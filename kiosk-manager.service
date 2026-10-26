@@ -1,0 +1,16 @@
+[Unit]
+Description=Gestion locale du kiosque web
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+Environment=LANG=fr_FR.UTF-8
+ExecStart=/usr/bin/python3 %h/.local/share/kiosk-manager/kiosk_manager.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+KillMode=mixed
+UMask=0077

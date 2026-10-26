@@ -1,0 +1,12 @@
+# Public-source allowlist: local deployment material stays private.
+/*
+!/.gitignore
+!/README.md
+!/kiosk_manager.py
+!/display_control.py
+!/browser_tabs.py
+!/tv_control.py
+!/audio_control.py
+!/index.html
+!/kiosk-manager.service
+!/test_display_control.py
