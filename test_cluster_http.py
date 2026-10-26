@@ -68,6 +68,13 @@ class ClusterHTTPTests(unittest.TestCase):
         self.assertEqual(self.request('/api/cluster/relay',b'')[0],400)
 
 class ClusterUITests(unittest.TestCase):
+    def test_page_button_toggles_play_pause(self):
+        markup=Path(__file__).with_name('index.html').read_text()
+        self.assertNotIn("connect.textContent='Connexion'",markup)
+        self.assertIn("paused?'Play':'Pause'",markup)
+        self.assertIn("await act('kiosk')",markup)
+        self.assertIn("'En pause'",markup)
+
     def test_same_origin_tv_selection_routes_all_mutations_to_fixed_target(self):
         markup=Path(__file__).with_name('index.html').read_text()
         self.assertIn('id="tv-selector"',markup)
