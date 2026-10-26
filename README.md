@@ -1,5 +1,7 @@
 # Kiosk Manager
 
+> **AI-generated code disclaimer:** This project was developed using AI-generated code. It may contain errors, security vulnerabilities, or incomplete features. Review and test it before deployment; use it at your own risk.
+
 A lightweight web interface for managing a Linux/Chromium TV kiosk. Python standard library backend, French-language browser interface, and no Python package dependencies.
 
 ## Features
