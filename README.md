@@ -27,7 +27,7 @@ Run as the graphical desktop user. Back up existing kiosk startup scripts and br
 
 ```sh
 mkdir -p ~/.local/share/kiosk-manager ~/.config/kiosk-manager ~/.config/systemd/user
-cp kiosk_manager.py display_control.py browser_tabs.py tv_control.py audio_control.py index.html ~/.local/share/kiosk-manager/
+cp kiosk_manager.py display_control.py lan_cluster.py browser_tabs.py tv_control.py audio_control.py index.html ~/.local/share/kiosk-manager/
 cp kiosk-manager.service ~/.config/systemd/user/
 ```
 
@@ -76,12 +76,33 @@ POST /api/display/settings
 {"output":"HDMI-1","mode":"1920x1080","rate":"60.00"}
 ```
 
-The resolution feature is newly added source: final UI/hardware acceptance and deployment were not completed when this repository was prepared. Do not treat repository publication as verification on your TV.
+Resolution controls have been exercised in a real browser against two Xorg TV kiosks, including applying and reading back their existing Full HD modes. This does not establish support for every advertised mode or TV model.
+
+## LAN discovery and managing multiple TVs
+
+Open any paired dashboard, sign in using its existing HTTP login, then choose a TV in **TV à gérer**. Pages, browser actions, HDMI-CEC, display settings, soundboard, uploads, and audio settings are sent through that dashboard to the selected TV. The browser stays on the same origin, so it does not prompt for each TV's credentials. This is a single-login management gateway, not an OIDC provider or cross-domain cookie SSO. Directly opening another TV's URL still uses that TV's own login.
+
+Discovery uses signed IPv4 multicast beacons on `239.255.87.65:18766/UDP`, with TTL 1. It does not scan the subnet. Only devices provisioned with the same pairing key and allowed LAN networks appear. Offline peers are marked unavailable; failed requests never silently operate on the local TV. Switching TVs reloads the page with a fixed target and waits for pending edits.
+
+Provision `~/.config/kiosk-manager/cluster.json` privately, mode `0600`, on each TV. Required fields:
+
+- `id`: a unique random 32-character hex node ID per TV.
+- `key`: a shared random 64-character hex pairing secret, identical only among trusted TVs.
+- `name`: a human-readable TV name.
+- `address`: that TV's LAN IPv4 interface address.
+- `port`: the common HTTP proxy port, normally `80`.
+- `networks`: explicit allowed LAN CIDRs.
+
+Generate IDs and keys with Python's `secrets.token_hex(16)` and `secrets.token_hex(32)` respectively. Transfer the shared key using SSH or another secure channel, never public source control. With no pairing configuration the application stays standalone. All paired devices are equally trusted to administer the group; to remove a compromised member, rotate the key on the remaining devices. This feature does not synchronize or replace the existing HTTP passwords.
+
+Keep the backend bound to loopback. In your authenticated, LAN-restricted reverse proxy, allow machine-to-machine access only to the exact `/api/cluster/relay` location. That location must proxy to the loopback backend without Basic authentication, clear incoming UI-token/Authorization/Origin headers, preserve the signed `X-Kiosk-*` peer headers, and retain LAN access restrictions and body limits. All other locations must keep their existing authentication. The application checks paired identities, destination, HMAC signatures, timestamp freshness, replay nonces, request limits, and an explicit API allowlist; an unsigned relay request is denied. Do not expose the relay to the Internet.
+
+The existing HTTP deployment is for a trusted LAN: HMAC authenticates messages but does not encrypt page configuration or audio content. Use HTTPS or a VPN on an untrusted network. Multicast must be allowed between the TVs; Wi-Fi client isolation or separate VLANs can prevent discovery.
 
 ## Development
 
 ```sh
-python3 -m unittest -v test_display_control
+python3 -m unittest -v test_display_control test_cluster_http test_lan_cluster
 ```
 
 Tests use a simulated display-command runner and a real localhost HTTP server; they do not change a physical display. This is focused regression coverage, not an end-to-end hardware test suite.

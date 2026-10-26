@@ -5,6 +5,7 @@
 .display-panel{margin-bottom:16px;padding:12px 14px}.display-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}.display-row label{display:flex;gap:6px;align-items:center}.display-row .sub{flex:1;min-width:180px}.display-message{font-size:12px;color:var(--muted);margin:8px 0 0}.display-message.bad{color:var(--bad)}
 </style></head><body data-public="__PUBLIC_URL__" data-ssh="__SSH_TARGET__"><main class="app">
 <header class="top"><div class="brand"><h1>Kiosque</h1><span class="host" id="host"></span></div><div class="top-actions"><span id="health" class="pill">Connexion…</span><button id="resume" class="primary">Affichage</button><button id="next">Page suivante</button><button id="reload">Actualiser</button></div></header>
+<section class="tvbar" aria-label="TVs du réseau"><label>TV à gérer <select id="tv-selector" aria-label="TV à gérer"><option value="">Cette TV · locale</option></select></label><span id="cluster-status" class="sub">Recherche des TVs appairées…</span></section><p id="target-banner" class="hint" role="status">Contrôle de cette TV.</p>
 <div class="tvbar"><div><div class="inline"><span class="tv-title">TV</span><span id="tv-power" class="pill">Détection…</span><span id="tv-device" class="sub"></span></div><div id="tv-message" class="tv-copy"></div></div><div class="inline"><button id="tv-wake">Réveiller</button><button id="tv-source">Entrée HDMI</button><button id="tv-check">Vérifier</button></div></div>
 <p id="browser-error" class="error-box" role="alert"></p>
 <section class="panel display-panel" aria-labelledby="display-title"><h2 id="display-title">Résolution de l’écran</h2><p class="hint">Choisissez une résolution et une fréquence par sortie connectée, puis cliquez sur « Appliquer ». Le réglage vérifié est restauré au démarrage.</p><div id="display-controls"></div><p id="display-message" class="display-message" role="status" aria-live="polite">Détection de l’affichage…</p></section>
@@ -19,12 +20,40 @@
 <script nonce="__TOKEN__">
 'use strict';
 const token='__TOKEN__', $=id=>document.getElementById(id);
+const targetId=new URLSearchParams(location.search).get('tv')||'';
+const targetPath=path=>targetId&&path!=='/api/cluster'?'/api/peers/'+encodeURIComponent(targetId)+path.slice(4):path;
+let activeRequests=0;
 let rows=[],booted=false,dirty=false,saving=false,version=0,saveTimer,lastServerKey='',latest=null,padsKey='',outputsKey='',volumeDirty=false,volumeTimer,volumeSequence=Promise.resolve(),undoRows=null,toastTimer;
 const uid=()=>Math.random().toString(36).slice(2)+Date.now().toString(36);
 const signature=value=>JSON.stringify(value);
 function notify(text,bad=false,undo=null){$('toast-text').textContent=text;$('toast').className='toast'+(bad?' bad':'');$('toast').style.display='flex';$('toast-undo').hidden=!undo;$('toast-undo').onclick=undo;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').style.display='none',7000);}
 $('toast-close').onclick=()=>$('toast').style.display='none';
-async function api(path,data,extra={}){const options={cache:'no-store',...extra};if(data!==undefined){options.method='POST';options.headers={'Content-Type':'application/json','X-Kiosk-Token':token,...extra.headers};options.body=JSON.stringify(data);}const response=await fetch(path,options);let result;try{result=await response.json();}catch{throw new Error('Réponse du gestionnaire illisible. Rechargez la page.');}if(!response.ok){const error=new Error(result.error||'Opération non aboutie.');error.status=response.status;throw error;}return result;}
+async function api(path,data,extra={}){const options={cache:'no-store',...extra};if(data!==undefined){options.method='POST';options.headers={'Content-Type':'application/json','X-Kiosk-Token':token,...extra.headers};options.body=JSON.stringify(data);}let response;activeRequests++;try{response=await fetch(targetPath(path),options);}finally{activeRequests--;}let result;try{result=await response.json();}catch{throw new Error('Réponse du gestionnaire illisible. Rechargez la page.');}if(!response.ok){const error=new Error(result.error||'Opération non aboutie.');error.status=response.status;throw error;}return result;}
+async function refreshCluster(){
+ try{
+  const cluster=await api('/api/cluster'),select=$('tv-selector');
+  const peers=cluster.peers||[],chosen=peers.find(p=>p.id===targetId);
+  if(document.activeElement!==select){
+   select.replaceChildren(new Option((cluster.self.name||'Cette TV')+' · locale',''));
+   for(const peer of peers){const option=new Option(peer.name+' · '+peer.address+(peer.online?'':' · hors ligne'),peer.id);option.disabled=!peer.online;select.add(option);}
+   if(targetId&&!chosen)select.add(new Option('TV sélectionnée · indisponible',targetId));
+   select.value=targetId;
+  }
+  const online=peers.filter(p=>p.online).length;
+  $('cluster-status').textContent=cluster.error||(!cluster.enabled?'Mode autonome · aucun pairage':online+' autre(s) TV(s) appairée(s) · découverte LAN');
+  $('target-banner').textContent=targetId?(chosen?'Contrôle distant : '+chosen.name+' · '+chosen.address+(chosen.online?'':' · HORS LIGNE'):'TV distante indisponible. Aucun basculement vers la TV locale.'):'Contrôle local : '+(cluster.self.name||document.body.dataset.ssh);
+  $('target-banner').style.color=targetId&&!chosen?.online?'var(--bad)':targetId?'var(--accent)':'var(--muted)';
+  if(targetId){$('host').textContent=chosen?chosen.name+' · '+chosen.address:'TV distante';$('ssh-command').parentElement.hidden=true;$('api-example').textContent='API de la TV sélectionnée via '+location.origin+targetPath('/api/audio/play')+' · utiliser le jeton de cette interface.';}
+ }catch(error){$('cluster-status').textContent='Découverte indisponible';}
+}
+$('tv-selector').onchange=async()=>{
+ const desired=$('tv-selector').value;
+ await flush();
+ if(dirty||saving||volumeDirty||displayApplying||activeRequests||$('import-sound').disabled){$('tv-selector').value=targetId;notify('Attendez la fin des modifications avant de changer de TV.',true);return;}
+ const url=new URL(location.href);if(desired)url.searchParams.set('tv',desired);else url.searchParams.delete('tv');location.assign(url.href);
+};
+for(const link of document.querySelectorAll('a[href^="/api/"]'))link.setAttribute('href',targetPath(link.getAttribute('href')));
+refreshCluster();setInterval(refreshCluster,5000);
 function setSave(text,kind=''){$('save-state').textContent=text;$('save-state').className='save'+(kind?' '+kind:'');}
 function configuration(){const pages=[];for(const row of rows){const url=row.url.trim();if(!url)continue;let address;try{address=new URL(url);}catch{throw new Error('Complétez l’adresse HTTP(S) avant l’application.');}if(!['http:','https:'].includes(address.protocol)||address.username||address.password)throw new Error('Adresse HTTP(S) requise, sans mot de passe.');const duration=row.duration===''?0:Number(row.duration);if(!Number.isFinite(duration)||duration<0)throw new Error('Durée positive ou nulle ; 0 = changement manuel.');pages.push({name:row.name.trim()||address.hostname,url,duration});}return {pages};}
 function changed(delay=750){dirty=true;version++;setSave('Modification en cours…','warn');clearTimeout(saveTimer);saveTimer=setTimeout(flush,delay);}
@@ -83,7 +112,7 @@ $('stop-sound').onclick=async()=>{try{renderAudio((await api('/api/audio/stop',{
 $('volume').oninput=()=>{$('volume-value').textContent=$('volume').value+' %';volumeDirty=true;clearTimeout(volumeTimer);volumeTimer=setTimeout(saveVolume,300);};
 function saveVolume(){const value=Number($('volume').value);volumeSequence=volumeSequence.then(async()=>{try{await api('/api/audio/settings',{volume:value});if(Number($('volume').value)===value)volumeDirty=false;}catch(error){notify(error.message,true);}});}
 $('audio-output').onchange=async()=>{try{renderAudio((await api('/api/audio/settings',{device:$('audio-output').value})).audio);}catch(error){notify(error.message,true);}};
-$('import-sound').onclick=()=>$('audio-file').click();$('audio-file').onchange=async()=>{const file=$('audio-file').files[0];if(!file)return;if(file.size>20*1024*1024)return notify('Le fichier dépasse 20 Mo.',true);$('import-sound').disabled=true;$('import-sound').textContent='Import en cours…';try{const response=await fetch('/api/audio/upload',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Kiosk-Token':token,'X-Filename':encodeURIComponent(file.name)},body:file});const result=await response.json();if(!response.ok)throw new Error(result.error||'Import non abouti.');renderAudio(result.audio);notify('Son importé : '+result.sound.name);}catch(error){notify(error.message,true);}finally{$('import-sound').disabled=false;$('import-sound').textContent='+ Importer un son';$('audio-file').value='';}};
+$('import-sound').onclick=()=>$('audio-file').click();$('audio-file').onchange=async()=>{const file=$('audio-file').files[0];if(!file)return;if(file.size>20*1024*1024)return notify('Le fichier dépasse 20 Mo.',true);$('import-sound').disabled=true;$('import-sound').textContent='Import en cours…';try{const response=await fetch(targetPath('/api/audio/upload'),{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Kiosk-Token':token,'X-Filename':encodeURIComponent(file.name)},body:file});const result=await response.json();if(!response.ok)throw new Error(result.error||'Import non abouti.');renderAudio(result.audio);notify('Son importé : '+result.sound.name);}catch(error){notify(error.message,true);}finally{$('import-sound').disabled=false;$('import-sound').textContent='+ Importer un son';$('audio-file').value='';}};
 async function deleteSound(id){try{renderAudio((await api('/api/audio/delete',{id})).audio);notify('Son retiré.');}catch(error){notify(error.message,true);}}
 async function revealKey(){const result=await api('/api/audio/key');$('api-key').value=result.key;return result.key;}
 $('show-key').onclick=async()=>{try{if($('api-key').type==='password'){await revealKey();$('api-key').type='text';$('show-key').textContent='Masquer';}else{$('api-key').type='password';$('show-key').textContent='Voir';}}catch(error){notify(error.message,true);}};
@@ -94,5 +123,5 @@ const applied=state.applied_config||config,active=applied.pages[state.page];$('m
 if(!dirty&&!saving)setSave(signature(config)===signature(state.applied_config)?'Appliqué automatiquement':'Application…',signature(config)===signature(state.applied_config)?'':'warn');for(const line of document.querySelectorAll('.page-row')){const row=rows.find(r=>r.id===line.dataset.row);const index=rows.filter(r=>r.url.trim()).findIndex(r=>r.id===row.id);line.classList.toggle('current',!empty&&index===state.page);const connect=line.querySelector('.row-actions button');connect.disabled=!row.url.trim();}
 }catch(error){$('health').textContent='Gestionnaire inaccessible';$('health').className='pill bad';setSave(error.message,'bad');}}
 $('host').textContent=document.body.dataset.ssh;$('ssh-command').textContent='ssh -N -L 8765:127.0.0.1:8765 '+document.body.dataset.ssh;$('api-example').textContent='curl -u '+document.body.dataset.ssh.split('@')[0]+' \\\n  -H "X-API-Key: VOTRE_CLE" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"id":"bips"}\' \\\n  '+document.body.dataset.public+'/api/audio/play';
-window.addEventListener('pagehide',()=>{if(dirty){try{fetch('/api/config',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json','X-Kiosk-Token':token},body:JSON.stringify(configuration())});}catch{}}});refresh();setInterval(refresh,1800);
+window.addEventListener('pagehide',()=>{if(dirty){try{fetch(targetPath('/api/config'),{method:'POST',keepalive:true,headers:{'Content-Type':'application/json','X-Kiosk-Token':token},body:JSON.stringify(configuration())});}catch{}}});refresh();setInterval(refresh,1800);
 </script></body></html>

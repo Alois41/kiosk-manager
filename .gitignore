@@ -10,3 +10,6 @@
 !/index.html
 !/kiosk-manager.service
 !/test_display_control.py
+!/lan_cluster.py
+!/test_lan_cluster.py
+!/test_cluster_http.py

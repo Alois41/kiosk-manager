@@ -22,6 +22,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, unquote
+from urllib.request import Request, build_opener, ProxyHandler
+from urllib.error import HTTPError
 from tv_control import CecControl, wake_host_output
 from browser_tabs import prepare_tab_session
 from audio_control import AudioControl, MAX_UPLOAD
@@ -44,6 +46,7 @@ LOG = logging.getLogger('kiosk')
 TV = CecControl()
 AUDIO = AudioControl(ROOT)
 DISPLAY = DisplayControl(ROOT)
+LAN = None  # Initialized at startup; unconfigured kiosks remain standalone.
 
 
 def validate_config(value):
@@ -333,7 +336,7 @@ class Handler(BaseHTTPRequestHandler):
         LOG.info('%s %s', self.command, self.path.split('?')[0])
 
     def reply(self, code, body, content_type='application/json; charset=utf-8'):
-        raw = body.encode('utf-8')
+        raw = body if isinstance(body, bytes) else body.encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(raw)))
@@ -350,6 +353,30 @@ class Handler(BaseHTTPRequestHandler):
     def allowed_host(self):
         return self.headers.get('Host', '') in {f'127.0.0.1:{PORT}', f'localhost:{PORT}'}
 
+    def proxy_peer(self, method, path):
+        """Same-origin UI gateway. Never accepts a caller-supplied destination URL."""
+        match = re.fullmatch(r'/api/peers/([0-9a-f]{32})(/[^?]*)', path)
+        if not match or self.path != path or LAN is None:
+            return self.respond(400, {'error': 'TV ou route inconnue.'})
+        ident, suffix = match.groups()
+        remote_path = '/api' + suffix
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+            limit = MAX_UPLOAD if method == 'POST' and remote_path == '/api/audio/upload' else 65536
+            if not 0 <= size <= limit or (method == 'GET' and size):
+                raise ValueError('Requête trop grande ou invalide.')
+            body = self.rfile.read(size) if size else b''
+            if len(body) != size:
+                raise ValueError('Requête incomplète.')
+            code, raw, _ = LAN.request(ident, method, remote_path, body,
+                                      self.headers.get('Content-Type', 'application/json'),
+                                      self.headers.get('X-Filename', ''))
+            return self.reply(code, raw)
+        except (ValueError, TypeError):
+            return self.respond(400, {'error': 'Requête distante invalide.'})
+        except (OSError, RuntimeError):
+            return self.respond(503, {'error': 'TV distante indisponible. Aucun basculement vers la TV locale.'})
+
     def do_GET(self):
         if not self.allowed_host():
             return self.respond(403, {'error': 'Accès local uniquement.'})
@@ -358,6 +385,10 @@ class Handler(BaseHTTPRequestHandler):
             markup = Path(__file__).with_name('index.html').read_text().replace('__TOKEN__', TOKEN)
             markup = markup.replace('__SSH_TARGET__', html.escape(SSH_TARGET, quote=True)).replace('__PUBLIC_URL__', html.escape(PUBLIC_URL, quote=True))
             return self.reply(200, markup, 'text/html; charset=utf-8')
+        if path.startswith('/api/peers/'):
+            return self.proxy_peer('GET', path)
+        if path == '/api/cluster':
+            return self.respond(200, LAN.snapshot() if LAN else {'enabled': False, 'self': {}, 'peers': [], 'error': ''})
         if path == '/api/status':
             return self.respond(200, {'state': snapshot(), 'config': read_config(), 'tv': TV.snapshot(), 'audio': AUDIO.snapshot(), 'display': DISPLAY.snapshot()})
         if path == '/api/display':
@@ -378,14 +409,55 @@ class Handler(BaseHTTPRequestHandler):
                            'POST /api/audio/delete': {'id': 'identifiant du son importé'}}})
         return self.respond(404, {'error': 'Introuvable.'})
 
+    def relay_peer(self):
+        """Machine-to-machine entry point: paired HMAC authentication, not UI auth."""
+        if not self.allowed_host() or self.path != '/api/cluster/relay' or LAN is None:
+            return self.respond(403, {'error': 'Pairage requis.'})
+        try:
+            size = int(self.headers.get('Content-Length', '0'))
+            if not 0 <= size <= MAX_UPLOAD:
+                raise ValueError('Requête trop grande.')
+            body = self.rfile.read(size) if size else b''
+            if len(body) != size:
+                raise ValueError('Requête incomplète.')
+            method, path, content_type, filename = LAN.verify(self.headers, body)
+            # Defense in depth: the relay can never become a URL fetcher or recurse.
+            if method not in ('GET', 'POST') or not re.fullmatch(
+                    r'/api/(?:status|display(?:/settings)?|tv|config|action|audio(?:/(?:sounds|key|api|play(?:/[A-Za-z0-9_-]+)?|stop|settings|upload|delete))?)', path):
+                raise ValueError('Route interdite.')
+            headers = {'X-Kiosk-Token': TOKEN, 'Content-Type': content_type}
+            if filename:
+                headers['X-Filename'] = filename
+            request = Request(f'http://127.0.0.1:{PORT}' + path,
+                              data=body if method == 'POST' else None, headers=headers, method=method)
+            try:
+                response = build_opener(ProxyHandler({})).open(request, timeout=30)
+            except HTTPError as error:
+                response = error
+            with response:
+                raw = response.read(32 * 1024 * 1024 + 1)
+                if len(raw) > 32 * 1024 * 1024:
+                    raise ValueError('Réponse trop grande.')
+                return self.reply(response.status, raw)
+        except PermissionError:
+            return self.respond(403, {'error': 'Pairage ou signature invalide.'})
+        except (ValueError, TypeError):
+            return self.respond(400, {'error': 'Requête signée invalide.'})
+        except (OSError, RuntimeError):
+            return self.respond(503, {'error': 'Relais indisponible.'})
+
     def do_POST(self):
         path = urlsplit(self.path).path
+        if path == '/api/cluster/relay':
+            return self.relay_peer()
         ui_token = hmac.compare_digest(self.headers.get('X-Kiosk-Token', '').encode(), TOKEN.encode())
         audio_key = path.startswith('/api/audio/') and AUDIO.authorized(self.headers.get('X-API-Key', ''))
         if not self.allowed_host() or not (ui_token or audio_key):
             return self.respond(403, {'error': 'Accès refusé. Rechargez l’interface ou fournissez la clé API audio.'})
         if self.headers.get('Origin') not in (None, f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'):
             return self.respond(403, {'error': 'Origine refusée.'})
+        if path.startswith('/api/peers/'):
+            return self.proxy_peer('POST', path)
         try:
             size = int(self.headers.get('Content-Length', '0'))
             if path == '/api/audio/upload':
@@ -454,7 +526,10 @@ class Handler(BaseHTTPRequestHandler):
         self.connection.settimeout(60)
 
 def main():
+    from lan_cluster import LanCluster
+    global LAN
     os.umask(0o077)
+    LAN = LanCluster(ROOT)
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
                         handlers=[logging.StreamHandler(), RotatingFileHandler(ROOT / 'manager.log', maxBytes=2_000_000, backupCount=2)])
@@ -465,6 +540,7 @@ def main():
     AUDIO.start()
     TV.start()
     DISPLAY.start()
+    LAN.start()
     thread = threading.Thread(target=controller, daemon=False)
     thread.start()
     server.timeout = 0.5
@@ -475,6 +551,7 @@ def main():
         STOP.set()
         AUDIO.close()
         DISPLAY.close()
+        LAN.close()
         server.server_close()
         thread.join(timeout=25)
         TV.close()
