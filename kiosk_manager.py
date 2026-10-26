@@ -140,10 +140,18 @@ def key(win, value):
 
 
 def navigate(win, url):
-    key(win, 'ctrl+l')
-    run(['xdotool', 'type', '--clearmodifiers', '--delay', '3', url], timeout=30)
-    time.sleep(0.15)
-    key(win, 'Return')
+    # Chromium can ignore Ctrl+L while fullscreen, yet xdotool reports success.
+    was_fullscreen = '_NET_WM_STATE_FULLSCREEN' in run(['xprop', '-id', win, '_NET_WM_STATE'])
+    if was_fullscreen:
+        fullscreen(win, False)
+    try:
+        key(win, 'ctrl+l')
+        run(['xdotool', 'type', '--clearmodifiers', '--delay', '3', url], timeout=30)
+        time.sleep(0.15)
+        key(win, 'Return')
+    finally:
+        if was_fullscreen:
+            fullscreen(win, True)
 
 
 def apply_tabs(win, old_config, new_config):
